@@ -10,17 +10,24 @@ router.get('/user/:userId', async (req, res) => {
 
     const result = await pool.query(`
       SELECT p.*, u.name as owner_name, u.email as owner_email,
-        COUNT(DISTINCT t.id) as total_tasks,
-        COUNT(DISTINCT CASE WHEN i.status = 'completed' THEN i.id END) as completed_items,
-        COUNT(DISTINCT i.id) as total_items
+        COALESCE(task_stats.total_tasks, 0)::INTEGER as total_tasks,
+        COALESCE(task_stats.completed_items, 0)::INTEGER as completed_items,
+        COALESCE(task_stats.total_items, 0)::INTEGER as total_items
       FROM projects p
       LEFT JOIN users u ON p.owner_id = u.id
-      LEFT JOIN tasks t ON p.id = t.project_id
-      LEFT JOIN items i ON t.id = i.task_id
+      LEFT JOIN (
+        SELECT
+          t.project_id,
+          COUNT(DISTINCT t.id) as total_tasks,
+          COUNT(DISTINCT i.id) as total_items,
+          COUNT(DISTINCT CASE WHEN i.status = 'completed' THEN i.id END) as completed_items
+        FROM tasks t
+        LEFT JOIN items i ON t.id = i.task_id
+        GROUP BY t.project_id
+      ) task_stats ON p.id = task_stats.project_id
       WHERE p.owner_id = $1 OR p.id IN (
         SELECT project_id FROM project_members WHERE user_id = $1
       )
-      GROUP BY p.id, u.id
       ORDER BY p.created_at DESC
     `, [userId]);
 
@@ -52,16 +59,16 @@ router.get('/:id', async (req, res) => {
     // Calculate progress
     const progressResult = await pool.query(`
       SELECT
-        COUNT(DISTINCT t.id) as total_tasks,
-        COUNT(DISTINCT i.id) as total_items,
-        COUNT(DISTINCT CASE WHEN i.status = 'completed' THEN i.id END) as completed_items
+        COUNT(DISTINCT t.id)::INTEGER as total_tasks,
+        COUNT(DISTINCT i.id)::INTEGER as total_items,
+        COUNT(DISTINCT CASE WHEN i.status = 'completed' THEN i.id END)::INTEGER as completed_items
       FROM tasks t
       LEFT JOIN items i ON t.id = i.task_id
       WHERE t.project_id = $1
     `, [id]);
 
     const { total_tasks, total_items, completed_items } = progressResult.rows[0];
-    const progress = total_items > 0 ? Math.round((completed_items / total_items) * 100) : 0;
+    const progress = (total_items > 0 && completed_items !== null) ? Math.round((parseInt(completed_items) / parseInt(total_items)) * 100) : 0;
 
     res.json({
       ...project,
